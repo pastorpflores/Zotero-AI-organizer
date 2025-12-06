@@ -27,13 +27,36 @@ class LibraryOrganizer:
             output_price=config['api_pricing']['output']
         )
 
+    def _get_item_label(self, item_type: str) -> str:
+        """Get human-readable label for item type."""
+        labels = {
+            'journalArticle': 'research paper',
+            'book': 'book',
+            'bookSection': 'book chapter',
+            'conferencePaper': 'conference paper',
+            'thesis': 'thesis',
+            'preprint': 'preprint',
+            'report': 'technical report',
+            'manuscript': 'manuscript',
+            'patent': 'patent',
+            'webpage': 'webpage',
+            'blogPost': 'blog post',
+            'presentation': 'presentation',
+        }
+        return labels.get(item_type, 'publication')
+
     def improve_paper_keywords(self, paper_id: int, library: ZoteroLibrary) -> List[str]:
         item = library.items[paper_id]
+        item_label = self._get_item_label(item.item_type)
 
-        prompt = f"""Suggest generic, reusable keywords for this paper. Terms should focus on the main process,
-        technique, or concept, no too broad terms. Include only the most relevant keywords.:
+        prompt = f"""Suggest generic, reusable keywords for this {item_label}.
+        Terms should focus on the main process, technique, or concept, not too broad terms.
+        Include only the most relevant keywords.
+
         Title: {item.title}
-        Abstract: {item.abstract}
+        {"Abstract: " + item.abstract if item.abstract else ""}
+        Type: {item.item_type}
+
         List only keywords, one per line."""
 
         response = self.client.messages.create(
@@ -50,12 +73,22 @@ class LibraryOrganizer:
         keywords = sorted(library.get_all_keywords())
         keywords_str = "\n".join(keywords)
 
-        prompt = f"""Given these keywords from a research paper library:
+        # Analyze item type distribution
+        type_counts = {}
+        for item in library.items.values():
+            type_counts[item.item_type] = type_counts.get(item.item_type, 0) + 1
+
+        type_summary = ", ".join([f"{count} {t}s" for t, count in type_counts.items()])
+
+        prompt = f"""Given these keywords from a research library:
         {keywords_str}
+
+        Library contains: {type_summary}
 
         {self.field_context if self.field_context else ''}
 
-        Create a hierarchical collection structure as JSON to organize papers with these topics.
+        Create a hierarchical collection structure as JSON to organize publications with these topics.
+        The structure should work well for different publication types (articles, books, reports, etc.).
         Return ONLY valid JSON, with no trailing commas. Limit the proposal to a maximum 100 total collections.
         If a sub-collection is located with a parent collection called Battery Aging, don't repeat the word
         Battery Aging in the sub-collection name, subcollection example: Aging Mechanisms, Black box Modelling..."""
@@ -191,15 +224,19 @@ class LibraryOrganizer:
             return
 
         # Get collection suggestions from LLM
-        prompt = f"""Given this paper:
+        item_type_label = self._get_item_label(item.item_type)
+
+        prompt = f"""Given this {item_type_label}:
         Title: {item.title}
-        Abstract: {item.abstract}
+        {"Abstract: " + item.abstract if item.abstract else ""}
         Keywords: {', '.join(item.keywords)}
+        Type: {item.item_type}
 
         And these available collections:
         {chr(10).join(collection_paths)}
 
-        List the most appropriate collections for this paper. Output only the exact collection paths, one per line.
+        List the most appropriate collections for this publication.
+        Output only the exact collection paths, one per line.
         Choose between 1-3 most relevant collections."""
 
         response = self.client.messages.create(

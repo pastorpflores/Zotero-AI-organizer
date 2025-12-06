@@ -13,6 +13,8 @@ class ZoteroItem:
     keywords: List[str]
     abstract: str
     collections: List[str]
+    item_type: str
+    metadata: Dict[str, str] = None
 
 
 class ZoteroCollection:
@@ -27,11 +29,17 @@ class ZoteroCollection:
 class ZoteroLibrary:
     """Main class to interact with Zotero SQLite database."""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, item_types: List[str] = None):
         self.db_path = self._find_db_path(db_path)
         self.collections: Dict[int, ZoteroCollection] = {}
         self.items: Dict[int, ZoteroItem] = {}
         self.library_id = None  # Will be set when loading library
+
+        # Configure item types (default: journalArticle for backward compatibility)
+        self.item_types = item_types if item_types else ['journalArticle']
+
+        # System types to exclude
+        self.excluded_types = {'note', 'attachment', 'annotation'}
 
     def _find_db_path(self, db_path: Optional[str]) -> str:
         """Locate Zotero database file."""
@@ -62,18 +70,19 @@ class ZoteroLibrary:
             self._load_collection_items(conn)
 
     def _detect_library_id(self, conn: sqlite3.Connection) -> None:
-        """Detect the libraryID from journal article items."""
-        cursor = conn.execute("""
+        """Detect the libraryID from configured item types."""
+        type_placeholders = ','.join(['?' for _ in self.item_types])
+
+        cursor = conn.execute(f"""
             SELECT DISTINCT i.libraryID
             FROM items i
-            WHERE i.itemTypeID = (SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle')
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE it.typeName IN ({type_placeholders})
             LIMIT 1
-        """)
+        """, tuple(self.item_types))
+
         result = cursor.fetchone()
-        if result:
-            self.library_id = result[0]
-        else:
-            self.library_id = 1  # Fallback to default
+        self.library_id = result[0] if result else 1
 
     def _load_collections(self, conn: sqlite3.Connection) -> None:
         """Load collections from database."""
@@ -86,9 +95,13 @@ class ZoteroLibrary:
             self.collections[collection_id] = ZoteroCollection(collection_id, name, parent_id)
 
     def _load_items(self, conn: sqlite3.Connection) -> None:
-        """Load items from database."""
-        cursor = conn.execute("""
-            SELECT i.itemID,
+        """Load items from database with configurable item types."""
+        type_placeholders = ','.join(['?' for _ in self.item_types])
+
+        cursor = conn.execute(f"""
+            SELECT
+                i.itemID,
+                it.typeName,
                 (SELECT iv.value FROM itemData id
                     JOIN itemDataValues iv ON id.valueID = iv.valueID
                     WHERE id.itemID = i.itemID
@@ -99,24 +112,36 @@ class ZoteroLibrary:
                     WHERE id.itemID = i.itemID
                     AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'abstractNote')
                     LIMIT 1) as abstract,
+                (SELECT iv.value FROM itemData id
+                    JOIN itemDataValues iv ON id.valueID = iv.valueID
+                    WHERE id.itemID = i.itemID
+                    AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'extra')
+                    LIMIT 1) as extra,
                 (SELECT GROUP_CONCAT(t.name, '; ')
                     FROM itemTags it
                     JOIN tags t ON it.tagID = t.tagID
                     WHERE it.itemID = i.itemID) as keywords
             FROM items i
-            WHERE i.itemTypeID = (SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle')
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE it.typeName IN ({type_placeholders})
             AND i.libraryID = ?
-        """, (self.library_id,))
+        """, tuple(self.item_types) + (self.library_id,))
 
-        for item_id, title, abstract, keywords in cursor.fetchall():
-            if title:
+        for item_id, item_type, title, abstract, extra, keywords in cursor.fetchall():
+            if title:  # Must have a title
+                # Fallback strategy: use abstract if available, else extra field
+                primary_text = abstract if abstract else (extra or "")
+
                 keywords_list = keywords.split('; ') if keywords else []
+
                 self.items[item_id] = ZoteroItem(
                     item_id=item_id,
                     title=title,
                     keywords=keywords_list,
-                    abstract=abstract or "",
-                    collections=[]
+                    abstract=primary_text,
+                    collections=[],
+                    item_type=item_type,
+                    metadata={}
                 )
 
     def _load_collection_items(self, conn: sqlite3.Connection) -> None:

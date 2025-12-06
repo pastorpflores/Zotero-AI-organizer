@@ -18,6 +18,17 @@ def load_config(config_path: str = 'config.json') -> dict:
         sys.exit(1)
 
 
+def validate_config(config: dict) -> None:
+    """Validate configuration and provide helpful warnings."""
+    if 'item_types' not in config:
+        print("Note: 'item_types' not specified. Using default: ['journalArticle']")
+        print("To process other types, add 'item_types' to config.json")
+    else:
+        item_types = config['item_types']
+        enabled = item_types if isinstance(item_types, list) else item_types.get('enabled', [])
+        print(f"Processing {len(enabled)} item type(s): {', '.join(enabled)}")
+
+
 def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
     """Generate new keywords for papers without collections."""
     unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
@@ -98,7 +109,18 @@ def main():
         sys.exit(1)
 
     config = load_config(args.config)
-    library = ZoteroLibrary(config['zotero_db_path'])
+    validate_config(config)
+
+    # Extract item_types from config (default: journalArticle)
+    item_types = config.get('item_types', ['journalArticle'])
+
+    # Handle both simple list and complex dict format (future-proofing)
+    if isinstance(item_types, dict):
+        item_types_list = item_types.get('enabled', ['journalArticle'])
+    else:
+        item_types_list = item_types
+
+    library = ZoteroLibrary(config['zotero_db_path'], item_types=item_types_list)
     library.load_library()
     organizer = LibraryOrganizer(config)
 
