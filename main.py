@@ -55,14 +55,14 @@ def implement_collections(library: ZoteroLibrary, organizer: LibraryOrganizer, s
         sys.exit(1)
 
 
-def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
+def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer, structure_file: str = 'proposal.json') -> None:
     """Classify papers without collections into the current hierarchy."""
     unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
     print(f"Found {len(unclassified)} unclassified papers")
 
     for paper_id, paper in unclassified.items():
         print(f"\nProcessing: {paper.title}")
-        organizer.classify_paper_in_collections(paper_id, library)
+        organizer.classify_paper_in_collections(paper_id, library, structure_file)
         print(f"Classified into: {', '.join(library.items[paper_id].collections)}")
 
 
@@ -84,7 +84,8 @@ def get_parser() -> argparse.ArgumentParser:
     implement_parser.add_argument("structure", help="Path to collection structure JSON")
 
     # Classify papers
-    subparsers.add_parser("classify", help="Classify unclassified papers into collections")
+    classify_parser = subparsers.add_parser("classify", help="Classify unclassified papers into collections")
+    classify_parser.add_argument("--structure", default="proposal.json", help="Path to collection structure JSON (default: proposal.json)")
     return parser
 
 
@@ -105,7 +106,7 @@ def main():
         "keywords": lambda: generate_keywords(library, organizer),
         "propose": lambda: propose_collections(library, organizer, args.output),
         "implement": lambda: implement_collections(library, organizer, args.structure),
-        "classify": lambda: classify_papers(library, organizer)
+        "classify": lambda: classify_papers(library, organizer, args.structure)
     }
 
     commands[args.command]()

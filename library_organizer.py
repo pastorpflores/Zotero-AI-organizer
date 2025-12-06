@@ -1,8 +1,10 @@
-import anthropic
 import json
-from typing import List, Dict
-from zotero_connector import ZoteroLibrary
 from dataclasses import dataclass
+from typing import Dict, List
+
+import anthropic
+
+from zotero_connector import ZoteroLibrary
 
 
 @dataclass
@@ -60,7 +62,7 @@ class LibraryOrganizer:
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -117,15 +119,22 @@ class LibraryOrganizer:
             # Delete existing collections
             library.delete_all_collections()
 
+            # Handle structure with top-level "collections" key
+            if 'collections' in structure and isinstance(structure['collections'], list):
+                collections_to_create = structure['collections']
+            else:
+                collections_to_create = structure
+
             # Create new structure
-            collection_map = library.create_collection_structure(structure)
+            collection_map = library.create_collection_structure(collections_to_create)
             print(f"Successfully created {len(collection_map)} collections")
 
         except Exception as e:
             print(f"Error implementing collection structure: {e}")
             raise
 
-    def classify_paper_in_collections(self, paper_id: int, library: ZoteroLibrary) -> None:
+    def classify_paper_in_collections(self, paper_id: int, library: ZoteroLibrary,
+                                      structure_file: str = 'proposal.json') -> None:
         """Classify a paper into appropriate collections using the LLM and update Zotero."""
         item = library.items[paper_id]
 
@@ -133,20 +142,53 @@ class LibraryOrganizer:
         collection_paths = []
         collection_map = {}  # Map paths to collection IDs
 
-        def flatten_collections(structure: dict, prefix: str = ""):
-            for name, content in structure.items():
-                full_path = f"{prefix}/{name}" if prefix else name
-                collection_paths.append(full_path)
-                # Map path to collection ID
-                for coll in library.collections.values():
-                    if coll.name == name:
-                        collection_map[full_path] = coll.collection_id
-                if isinstance(content, dict):
-                    flatten_collections(content, full_path)
+        def flatten_collections(structure, prefix: str = ""):
+            """Flatten collection structure supporting both dict and array formats."""
+            # Handle array-based structure
+            if isinstance(structure, list):
+                for item in structure:
+                    if isinstance(item, dict) and 'name' in item:
+                        name = item['name']
+                        full_path = f"{prefix}/{name}" if prefix else name
+                        collection_paths.append(full_path)
+                        # Map path to collection ID
+                        for coll in library.collections.values():
+                            if coll.name == name:
+                                collection_map[full_path] = coll.collection_id
+                                break
+                        # Recursively process subcollections
+                        if 'subcollections' in item and item['subcollections']:
+                            flatten_collections(item['subcollections'], full_path)
 
-        with open('my_proposal.json', 'r') as f:
+            # Handle dict-based structure (original format)
+            elif isinstance(structure, dict):
+                for name, content in structure.items():
+                    full_path = f"{prefix}/{name}" if prefix else name
+                    collection_paths.append(full_path)
+                    # Map path to collection ID
+                    for coll in library.collections.values():
+                        if coll.name == name:
+                            collection_map[full_path] = coll.collection_id
+                            break
+                    if isinstance(content, dict):
+                        flatten_collections(content, full_path)
+
+        # Load and flatten the collection structure
+        with open(structure_file, 'r') as f:
             structure = json.load(f)
-        flatten_collections(structure)
+
+        # Handle structure with top-level "collections" key
+        if 'collections' in structure and isinstance(structure['collections'], list):
+            flatten_collections(structure['collections'])
+        else:
+            flatten_collections(structure)
+
+        print(f"Loaded {len(collection_paths)} collection paths from {structure_file}")
+        print(f"Mapped {len(collection_map)} collections to IDs")
+
+        if not collection_paths:
+            print("Warning: No collection paths found in structure file!")
+            return
 
         # Get collection suggestions from LLM
         prompt = f"""Given this paper:
@@ -168,10 +210,20 @@ class LibraryOrganizer:
         )
 
         # Update paper collections in Zotero
-        collections = [line.strip() for line in response.content[0].text.split('\n') if line.strip()]
-        collection_ids = [collection_map[c] for c in collections if c in collection_map]
+        llm_response = response.content[0].text
+        print(f"LLM suggested collections:\n{llm_response}")
+
+        collections = [line.strip() for line in llm_response.split('\n') if line.strip()]
+        collection_ids = []
+        for c in collections:
+            if c in collection_map:
+                collection_ids.append(collection_map[c])
+            else:
+                print(f"Warning: Collection '{c}' not found in collection_map")
+
         if collection_ids:
             library.update_item_collections(paper_id, collection_ids)
-            print(f"Updated collections for paper: {collections}")
+            matched_names = [library.collections[cid].name for cid in collection_ids if cid in library.collections]
+            print(f"Successfully classified into: {matched_names}")
         else:
-            print("No matching collections found")
+            print("No matching collections found - paper not classified")

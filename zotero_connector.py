@@ -31,7 +31,7 @@ class ZoteroLibrary:
         self.db_path = self._find_db_path(db_path)
         self.collections: Dict[int, ZoteroCollection] = {}
         self.items: Dict[int, ZoteroItem] = {}
-        self.library_id = 1  # Default library ID
+        self.library_id = None  # Will be set when loading library
 
     def _find_db_path(self, db_path: Optional[str]) -> str:
         """Locate Zotero database file."""
@@ -56,16 +56,32 @@ class ZoteroLibrary:
     def load_library(self) -> None:
         """Load all collections and items from database."""
         with self.connect() as conn:
+            self._detect_library_id(conn)
             self._load_collections(conn)
             self._load_items(conn)
             self._load_collection_items(conn)
+
+    def _detect_library_id(self, conn: sqlite3.Connection) -> None:
+        """Detect the libraryID from journal article items."""
+        cursor = conn.execute("""
+            SELECT DISTINCT i.libraryID
+            FROM items i
+            WHERE i.itemTypeID = (SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle')
+            LIMIT 1
+        """)
+        result = cursor.fetchone()
+        if result:
+            self.library_id = result[0]
+        else:
+            self.library_id = 1  # Fallback to default
 
     def _load_collections(self, conn: sqlite3.Connection) -> None:
         """Load collections from database."""
         cursor = conn.execute("""
             SELECT collectionID, collectionName, parentCollectionID
             FROM collections
-        """)
+            WHERE libraryID = ?
+        """, (self.library_id,))
         for collection_id, name, parent_id in cursor.fetchall():
             self.collections[collection_id] = ZoteroCollection(collection_id, name, parent_id)
 
@@ -89,7 +105,8 @@ class ZoteroLibrary:
                     WHERE it.itemID = i.itemID) as keywords
             FROM items i
             WHERE i.itemTypeID = (SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle')
-        """)
+            AND i.libraryID = ?
+        """, (self.library_id,))
 
         for item_id, title, abstract, keywords in cursor.fetchall():
             if title:
@@ -212,25 +229,51 @@ class ZoteroLibrary:
     def delete_all_collections(self) -> None:
         """Delete all collections from the library."""
         with self.connect() as conn:
-            conn.execute("DELETE FROM collectionItems")
-            conn.execute(f"DELETE FROM collections WHERE libraryID = {self.library_id}")
+            # Delete collectionItems only for collections in this library
+            conn.execute("""
+                DELETE FROM collectionItems
+                WHERE collectionID IN (
+                    SELECT collectionID FROM collections WHERE libraryID = ?
+                )
+            """, (self.library_id,))
+            conn.execute("DELETE FROM collections WHERE libraryID = ?", (self.library_id,))
             self.collections.clear()
             for item in self.items.values():
                 item.collections.clear()
 
-    def create_collection_structure(self, structure: dict, parent_id: Optional[int] = None) -> Dict[str, int]:
-        """Create a nested collection structure from a dictionary.
-        Returns a mapping of collection names to their IDs."""
+    def create_collection_structure(self, structure, parent_id: Optional[int] = None) -> Dict[str, int]:
+        """Create a nested collection structure from a dictionary or list.
+        Returns a mapping of collection names to their IDs.
+
+        Supports two formats:
+        1. Dict-based: {"Collection1": {"Subcollection1": {}}}
+        2. Array-based: [{"name": "Collection1", "subcollections": [{"name": "Subcollection1"}]}]
+        """
         collection_map = {}
 
-        for name, content in structure.items():
-            # Create the collection
-            collection_id = self.create_collection(name, parent_id)
-            collection_map[name] = collection_id
+        # Handle array-based structure
+        if isinstance(structure, list):
+            for item in structure:
+                if isinstance(item, dict) and 'name' in item:
+                    name = item['name']
+                    collection_id = self.create_collection(name, parent_id)
+                    collection_map[name] = collection_id
 
-            # Recursively create subcollections if they exist
-            if isinstance(content, dict):
-                subcollection_map = self.create_collection_structure(content, collection_id)
-                collection_map.update(subcollection_map)
+                    # Recursively create subcollections if they exist
+                    if 'subcollections' in item and item['subcollections']:
+                        subcollection_map = self.create_collection_structure(item['subcollections'], collection_id)
+                        collection_map.update(subcollection_map)
+
+        # Handle dict-based structure (original format)
+        elif isinstance(structure, dict):
+            for name, content in structure.items():
+                # Create the collection
+                collection_id = self.create_collection(name, parent_id)
+                collection_map[name] = collection_id
+
+                # Recursively create subcollections if they exist
+                if isinstance(content, dict):
+                    subcollection_map = self.create_collection_structure(content, collection_id)
+                    collection_map.update(subcollection_map)
 
         return collection_map
