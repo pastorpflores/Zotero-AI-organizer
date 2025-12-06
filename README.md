@@ -23,19 +23,21 @@ Provides AI-powered organization using the Anthropic Claude API:
 1. Clone the repository
 2. Install required packages:
 ```bash
-pip install anthropic sqlite3
+pip install anthropic
 ```
+Note: `sqlite3` is part of Python's standard library and does not need to be installed separately.
+
 3. Create a config.json file:
 ```json
 {
     "zotero_db_path": "/path/to/your/zotero.sqlite",
     "anthropic_api_key": "your-api-key-here",
-    "model": "claude-3-haiku-20240307",
+    "model": "claude-haiku-4-5-20251001",
     "api_pricing": {
-        "input": 0.80,
-        "cache_write": 1.00,
+        "input": 0.8,
+        "cache_write": 1.0,
         "cache_read": 0.08,
-        "output": 4.00
+        "output": 4.0
     }
 }
 ```
@@ -56,8 +58,11 @@ python main.py propose --output proposal.json
 # Implement the new collection structure
 python main.py implement proposal.json
 
-# Classify unclassified papers into new structure
+# Classify unclassified papers into new structure (uses proposal.json by default)
 python main.py classify
+
+# Classify using a custom structure file
+python main.py classify --structure my_custom_structure.json
 ```
 
 ### Typical Workflow
@@ -81,7 +86,11 @@ python main.py implement new_structure.json
 
 6. Classify papers into the new structure
 ```bash
+# Use default structure file (proposal.json)
 python main.py classify
+
+# Or use a specific structure file
+python main.py classify --structure new_structure.json
 ```
 
 ## Configuration
@@ -89,7 +98,7 @@ python main.py classify
 The config.json file requires:
 - `zotero_db_path`: Path to your Zotero SQLite database
 - `anthropic_api_key`: Your Anthropic API key
-- `model`: Claude model to use (e.g., "claude-3-haiku-20240307")
+- `model`: Claude model to use (e.g., "claude-haiku-4-5-20251001")
 - `api_pricing`: Current API pricing in USD per 1M tokens
 
 ## Caution
@@ -97,6 +106,77 @@ The config.json file requires:
 - Always backup your Zotero database before using this tool
 - Review generated keywords and collection proposals before implementation
 - Monitor API usage costs through the Anthropic dashboard
+
+## Recent Updates (December 2025)
+
+### Model Update
+- Upgraded to **claude-haiku-4-5-20251001** for improved performance
+- Increased max_tokens from 4000 to 8000 for better handling of complex responses
+
+### Enhanced Collection Structure Support
+The tool now supports two JSON structure formats for maximum flexibility:
+
+**1. Array-based format (recommended):**
+```json
+{
+  "collections": [
+    {
+      "name": "Machine Learning",
+      "subcollections": [
+        {"name": "Deep Learning"},
+        {"name": "Reinforcement Learning"}
+      ]
+    }
+  ]
+}
+```
+
+**2. Dict-based format (legacy):**
+```json
+{
+  "Machine Learning": {
+    "Deep Learning": {},
+    "Reinforcement Learning": {}
+  }
+}
+```
+
+### Custom Structure Files for Classification
+The `classify` command now supports custom structure files:
+```bash
+# Use default proposal.json
+python main.py classify
+
+# Use a different structure file
+python main.py classify --structure my_alternative_structure.json
+```
+
+This allows you to:
+- Test different collection structures without overwriting your main proposal
+- Maintain multiple organizational schemes for different purposes
+- Experiment with classification before committing to a structure
+
+### Multi-Library Support
+- **Automatic library detection**: The tool now automatically detects the correct library ID from your Zotero database
+- **Safer operations**: All collection operations are scoped to the specific library, preventing accidental modifications to other libraries
+- No manual configuration needed - the library ID is detected when loading the library
+
+### Code Improvements
+
+**library_organizer.py:**
+- Enhanced `classify_paper_in_collections()` to accept custom structure files
+- Improved error handling and logging during classification
+- Better feedback when collections cannot be matched
+
+**main.py:**
+- Added `--structure` parameter to `classify` command
+- Improved argument parsing and command routing
+
+**zotero_connector.py:**
+- Added automatic library ID detection via `_detect_library_id()` method
+- Updated all SQL queries to filter by libraryID for multi-library safety
+- Enhanced `create_collection_structure()` to handle both structure formats
+- Improved `delete_all_collections()` to only affect the target library
 
 ## License
 
