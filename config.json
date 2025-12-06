@@ -3,9 +3,9 @@
   "anthropic_api_key": "your-api-key-here",
   "model": "claude-haiku-4-5-20251001",
   "api_pricing": {
-    "input": 0.1,
-    "cache_write": 0.125,
-    "cache_read": 0.01,
-    "output": 0.5
+    "input": 1.0,
+    "cache_write": 1.25,
+    "cache_read": 0.10,
+    "output": 5.0
   }
 }
