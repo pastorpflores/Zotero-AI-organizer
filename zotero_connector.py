@@ -107,10 +107,21 @@ class ZoteroLibrary:
         self.library_id = result[0] if result else 1
 
     def _load_collections_from_api(self) -> None:
-        """Load collections from API."""
-        # limit=None fetches all
-        colls = self.zot.collections(limit=None)
-        for c in colls:
+        """Load collections from API with manual pagination."""
+        all_colls = []
+        start = 0
+        limit = 100
+        
+        while True:
+            colls = self.zot.collections(limit=limit, start=start)
+            all_colls.extend(colls)
+            if len(colls) < limit:
+                break
+            start += limit
+            
+        print(f"Fetched {len(all_colls)} collections from API.")
+        
+        for c in all_colls:
             data = c['data']
             key = data['key']
             name = data['name']
@@ -207,16 +218,26 @@ class ZoteroLibrary:
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
+    def get_collection_path(self, key: str) -> str:
+        """Recursively build path name/name/name"""
+        if key not in self.collections: return ""
+        coll = self.collections[key]
+        if coll.parent_key:
+            return f"{self.get_collection_path(coll.parent_key)}/{coll.name}"
+        return coll.name
+
     def update_item_collections(self, item_id: int, collection_keys: List[str]) -> None:
         if item_id not in self.items: raise ValueError("Item not found")
         if not self.zot: raise RuntimeError("API not initialized")
 
         item = self.items[item_id]
         try:
-            # We must fetch the item to update it safely (or use a patch if supported, but pyzotero uses PUT)
+            # We must fetch the item to update it safely
             current = self.zot.item(item.key)
-            current['collections'] = collection_keys
-            self.zot.update_item(current)
+            # update_item expects the 'data' content, not the full wrapper
+            item_data = current['data']
+            item_data['collections'] = collection_keys
+            self.zot.update_item(item_data)
             
             # Update local
             item.collections = [self.collections[k].name for k in collection_keys if k in self.collections]

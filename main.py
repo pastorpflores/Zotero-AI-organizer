@@ -77,15 +77,37 @@ def implement_collections(library: ZoteroLibrary, organizer: LibraryOrganizer, s
         sys.exit(1)
 
 
-def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer, structure_file: str = 'proposal.json') -> None:
-    """Classify papers without collections into the current hierarchy."""
-    unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
-    print(f"Found {len(unclassified)} unclassified papers")
+def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer, state_manager: StateManager, structure_file: str = 'proposal.json', force: bool = False) -> None:
+    """Classify papers into the current hierarchy."""
+    to_process = {}
+    
+    if force:
+        to_process = library.items
+        print(f"Force mode enabled. Processing all {len(to_process)} papers.")
+    else:
+        # Filter by state_manager instead of unreliable local collection status
+        for pid, paper in library.items.items():
+            if not state_manager.is_processed(pid, 'classify'):
+                to_process[pid] = paper
+                
+        print(f"Found {len(to_process)} papers pending classification")
+        processed_count = len(library.items) - len(to_process)
+        if processed_count > 0:
+            print(f"(Skipping {processed_count} already processed papers)")
 
-    for paper_id, paper in unclassified.items():
+    for paper_id, paper in to_process.items():
         print(f"\nProcessing: {paper.title}")
         organizer.classify_paper_in_collections(paper_id, library, structure_file)
-        print(f"Classified into: {', '.join(library.items[paper_id].collections)}")
+        
+        # Mark as processed regardless of outcome to prevent infinite loops on unclassifiable items
+        state_manager.mark_processed(paper_id, 'classify')
+        
+        # Determine success for display (this is local only, library.items updated by organizer)
+        current_colls = library.items[paper_id].collections
+        if current_colls:
+            print(f"Classified into: {', '.join(current_colls)}")
+        else:
+            print("Item left unclassified.")
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -108,6 +130,7 @@ def get_parser() -> argparse.ArgumentParser:
     # Classify papers
     classify_parser = subparsers.add_parser("classify", help="Classify unclassified papers into collections")
     classify_parser.add_argument("--structure", default="proposal.json", help="Path to collection structure JSON (default: proposal.json)")
+    classify_parser.add_argument("--force", action="store_true", help="Process all papers, including those already in collections")
     return parser
 
 
@@ -145,7 +168,7 @@ def main():
         "keywords": lambda: generate_keywords(library, organizer, state_manager),
         "propose": lambda: propose_collections(library, organizer, args.output),
         "implement": lambda: implement_collections(library, organizer, args.structure),
-        "classify": lambda: classify_papers(library, organizer, args.structure)
+        "classify": lambda: classify_papers(library, organizer, state_manager, args.structure, args.force)
     }
 
     commands[args.command]()

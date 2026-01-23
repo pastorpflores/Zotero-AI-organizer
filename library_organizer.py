@@ -201,56 +201,19 @@ class LibraryOrganizer:
         """Classify a paper into appropriate collections using the LLM and update Zotero."""
         item = library.items[paper_id]
 
-        # Get flattened collection structure
-        collection_paths = []
-        collection_map = {}  # Map paths to collection Keys
+        # Build a map of "Path/To/Collection" -> Key from the actual loaded library
+        # This ensures we match against what actually exists in Zotero
+        collection_map = {}
+        for key in library.collections:
+            path = library.get_collection_path(key)
+            if path:
+                collection_map[path] = key
 
-        def flatten_collections(structure, prefix: str = ""):
-            """Flatten collection structure supporting both dict and array formats."""
-            # Handle array-based structure
-            if isinstance(structure, list):
-                for item in structure:
-                    if isinstance(item, dict) and 'name' in item:
-                        name = item['name']
-                        full_path = f"{prefix}/{name}" if prefix else name
-                        collection_paths.append(full_path)
-                        # Map path to collection Key
-                        for coll in library.collections.values():
-                            if coll.name == name:
-                                collection_map[full_path] = coll.key
-                                break
-                        # Recursively process subcollections
-                        if 'subcollections' in item and item['subcollections']:
-                            flatten_collections(item['subcollections'], full_path)
-
-            # Handle dict-based structure (original format)
-            elif isinstance(structure, dict):
-                for name, content in structure.items():
-                    full_path = f"{prefix}/{name}" if prefix else name
-                    collection_paths.append(full_path)
-                    # Map path to collection Key
-                    for coll in library.collections.values():
-                        if coll.name == name:
-                            collection_map[full_path] = coll.key
-                            break
-                    if isinstance(content, dict):
-                        flatten_collections(content, full_path)
-
-        # Load and flatten the collection structure
-        with open(structure_file, 'r') as f:
-            structure = json.load(f)
-
-        # Handle structure with top-level "collections" key
-        if 'collections' in structure and isinstance(structure['collections'], list):
-            flatten_collections(structure['collections'])
-        else:
-            flatten_collections(structure)
-
-        print(f"Loaded {len(collection_paths)} collection paths from {structure_file}")
-        print(f"Mapped {len(collection_map)} collections to IDs")
+        collection_paths = sorted(list(collection_map.keys()))
+        print(f"Mapped {len(collection_map)} collections from Zotero library")
 
         if not collection_paths:
-            print("Warning: No collection paths found in structure file!")
+            print("Warning: No collections found in library!")
             return
 
         # Get collection suggestions from LLM
@@ -267,6 +230,7 @@ class LibraryOrganizer:
 
         List the most appropriate collections for this publication.
         Output only the exact collection paths, one per line.
+        Do not include any explanation or conversational text.
         Choose between 1-3 most relevant collections."""
 
         response = self.client.messages.create(
@@ -280,13 +244,22 @@ class LibraryOrganizer:
         llm_response = response.content[0].text
         print(f"LLM suggested collections:\n{llm_response}")
 
-        collections = [line.strip() for line in llm_response.split('\n') if line.strip()]
+        lines = [line.strip() for line in llm_response.split('\n') if line.strip()]
         collection_keys = []
-        for c in collections:
-            if c in collection_map:
-                collection_keys.append(collection_map[c])
+        
+        for line in lines:
+            # Exact match check
+            if line in collection_map:
+                collection_keys.append(collection_map[line])
             else:
-                print(f"Warning: Collection '{c}' not found in collection_map")
+                # Try to clean up quotes or bullets if model messed up
+                clean_line = line.strip(' "-*')
+                if clean_line in collection_map:
+                    collection_keys.append(collection_map[clean_line])
+                else:
+                    # Ignore conversational lines
+                    if '/' in line or line in collection_paths: # Only warn if it looks like a path
+                         print(f"Warning: Collection '{line}' not found in collection_map")
 
         if collection_keys:
             library.update_item_collections(paper_id, collection_keys)
