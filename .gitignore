@@ -1,5 +1,10 @@
 # real config
 config.json
+proposal.json
+my_proposal.json
+proposal*
+processed.db
+*.bak
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
