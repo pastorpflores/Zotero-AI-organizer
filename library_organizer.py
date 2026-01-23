@@ -49,9 +49,14 @@ class LibraryOrganizer:
         item = library.items[paper_id]
         item_label = self._get_item_label(item.item_type)
 
-        prompt = f"""Suggest generic, reusable keywords for this {item_label}.
-        Terms should focus on the main process, technique, or concept, not too broad terms.
-        Include only the most relevant keywords.
+        prompt = f"""Suggest 10 generic, reusable keywords for this {item_label}.
+        Terms should focus on the main topic, method, technique, concept, or subject.
+        Not too broad terms. Don't generate too similar keywords (e.g. INSTEAD 
+        OF 'neo-institutionalism', 'institutional theoy', 'social institutions'
+        just tag 'Neo-Institutionalism')
+        Include only the most relevant keywords. If you are missing the abstract,
+        don't state that you have no access to it. Just add keywords from the
+        title instead, as far as possible.
 
         Title: {item.title}
         {"Abstract: " + item.abstract if item.abstract else ""}
@@ -61,12 +66,37 @@ class LibraryOrganizer:
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=500,
+            max_tokens=800,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        new_keywords = [k.strip() for k in response.content[0].text.split('\n') if k.strip()]
-        library.update_item_keywords(paper_id, new_keywords)
+        raw_lines = [k.strip() for k in response.content[0].text.split('\n') if k.strip()]
+        new_keywords = []
+        
+        for line in raw_lines:
+            # Filter out obvious conversational noise or refusals
+            if len(line) > 100:
+                continue
+            
+            lower_line = line.lower()
+            if lower_line.startswith(("i don't", "i can't", "i cannot", "sorry", "here are", "sure, here", "unfortunately", "# Keywords", "#")):
+                continue
+                
+            # Remove common list enumerations (1. , - , *)
+            clean_line = line.lstrip("0123456789.-*• ")
+            
+            if clean_line:
+                new_keywords.append(clean_line)
+
+        if new_keywords:
+            try:
+                library.update_item_keywords(paper_id, new_keywords)
+                print(f"Added {len(new_keywords)} keywords to item {paper_id}")
+            except Exception as e:
+                print(f"Failed to update keywords for item {paper_id}: {e}")
+        else:
+            print(f"No valid keywords extracted for item {paper_id}. Raw response: {response.content[0].text[:100]}...")
+            
         return new_keywords
 
     def propose_collection_structure(self, library: ZoteroLibrary) -> Dict:
@@ -173,7 +203,7 @@ class LibraryOrganizer:
 
         # Get flattened collection structure
         collection_paths = []
-        collection_map = {}  # Map paths to collection IDs
+        collection_map = {}  # Map paths to collection Keys
 
         def flatten_collections(structure, prefix: str = ""):
             """Flatten collection structure supporting both dict and array formats."""
@@ -184,10 +214,10 @@ class LibraryOrganizer:
                         name = item['name']
                         full_path = f"{prefix}/{name}" if prefix else name
                         collection_paths.append(full_path)
-                        # Map path to collection ID
+                        # Map path to collection Key
                         for coll in library.collections.values():
                             if coll.name == name:
-                                collection_map[full_path] = coll.collection_id
+                                collection_map[full_path] = coll.key
                                 break
                         # Recursively process subcollections
                         if 'subcollections' in item and item['subcollections']:
@@ -198,10 +228,10 @@ class LibraryOrganizer:
                 for name, content in structure.items():
                     full_path = f"{prefix}/{name}" if prefix else name
                     collection_paths.append(full_path)
-                    # Map path to collection ID
+                    # Map path to collection Key
                     for coll in library.collections.values():
                         if coll.name == name:
-                            collection_map[full_path] = coll.collection_id
+                            collection_map[full_path] = coll.key
                             break
                     if isinstance(content, dict):
                         flatten_collections(content, full_path)
@@ -251,16 +281,16 @@ class LibraryOrganizer:
         print(f"LLM suggested collections:\n{llm_response}")
 
         collections = [line.strip() for line in llm_response.split('\n') if line.strip()]
-        collection_ids = []
+        collection_keys = []
         for c in collections:
             if c in collection_map:
-                collection_ids.append(collection_map[c])
+                collection_keys.append(collection_map[c])
             else:
                 print(f"Warning: Collection '{c}' not found in collection_map")
 
-        if collection_ids:
-            library.update_item_collections(paper_id, collection_ids)
-            matched_names = [library.collections[cid].name for cid in collection_ids if cid in library.collections]
+        if collection_keys:
+            library.update_item_collections(paper_id, collection_keys)
+            matched_names = [library.collections[cid].name for cid in collection_keys if cid in library.collections]
             print(f"Successfully classified into: {matched_names}")
         else:
             print("No matching collections found - paper not classified")

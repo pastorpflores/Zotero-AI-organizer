@@ -27,6 +27,9 @@ def validate_config(config: dict) -> None:
         item_types = config['item_types']
         enabled = item_types if isinstance(item_types, list) else item_types.get('enabled', [])
         print(f"Processing {len(enabled)} item type(s): {', '.join(enabled)}")
+        
+    if 'zotero_user_id' not in config or 'zotero_api_key' not in config:
+        print("Warning: 'zotero_user_id' or 'zotero_api_key' missing. Write operations (API) will fail.")
 
 
 def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
@@ -120,7 +123,12 @@ def main():
     else:
         item_types_list = item_types
 
-    library = ZoteroLibrary(config['zotero_db_path'], item_types=item_types_list)
+    library = ZoteroLibrary(
+        db_path=config['zotero_db_path'],
+        item_types=item_types_list,
+        zotero_user_id=config.get('zotero_user_id'),
+        zotero_api_key=config.get('zotero_api_key')
+    )
     library.load_library()
     organizer = LibraryOrganizer(config)
 
