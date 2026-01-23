@@ -4,6 +4,7 @@ import sys
 
 from zotero_connector import ZoteroLibrary
 from library_organizer import LibraryOrganizer
+from state_manager import StateManager
 
 
 def load_config(config_path: str = 'config.json') -> dict:
@@ -32,16 +33,23 @@ def validate_config(config: dict) -> None:
         print("Warning: 'zotero_user_id' or 'zotero_api_key' missing. Write operations (API) will fail.")
 
 
-def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
+def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer, state_manager: StateManager) -> None:
     """Generate new keywords for papers without collections."""
     unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
     print(f"Found {len(unclassified)} unclassified papers")
 
     for paper_id, paper in unclassified.items():
+        if state_manager.is_processed(paper_id, 'keywords'):
+            print(f"Skipping {paper.title} (already processed)")
+            continue
+
         print(f"\nProcessing: {paper.title}")
         print(f"Original keywords: {', '.join(paper.keywords)}")
         new_keywords = organizer.improve_paper_keywords(paper_id, library)
-        print(f"New keywords: {', '.join(new_keywords)}")
+        
+        if new_keywords:
+            state_manager.mark_processed(paper_id, 'keywords')
+            print(f"New keywords: {', '.join(new_keywords)}")
 
 
 def propose_collections(library: ZoteroLibrary, organizer: LibraryOrganizer, output_path: str = "proposed_collections.json") -> None:
@@ -131,15 +139,17 @@ def main():
     )
     library.load_library()
     organizer = LibraryOrganizer(config)
+    state_manager = StateManager()
 
     commands = {
-        "keywords": lambda: generate_keywords(library, organizer),
+        "keywords": lambda: generate_keywords(library, organizer, state_manager),
         "propose": lambda: propose_collections(library, organizer, args.output),
         "implement": lambda: implement_collections(library, organizer, args.structure),
         "classify": lambda: classify_papers(library, organizer, args.structure)
     }
 
     commands[args.command]()
+
 
 
 if __name__ == "__main__":
