@@ -115,10 +115,9 @@ class ZoteroLibrary:
     def create_collection(self, name: str, parent_id: Optional[int] = None) -> int:
         """Create new collection in Zotero."""
         with self.connect() as conn:
-            # Generate a unique key (8 random uppercase letters and numbers)
+            # Generate a unique key using Zotero's character set (excludes 0, 1, I, O)
             import random
-            import string
-            key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            key = ''.join(random.choices('23456789ABCDEFGHJKLMNPQRSTUVWXYZ', k=8))
 
             cursor = conn.execute(
                 "INSERT INTO collections (collectionName, parentCollectionID, libraryID, key) VALUES (?, ?, ?, ?)",
