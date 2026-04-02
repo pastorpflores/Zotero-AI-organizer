@@ -1,17 +1,7 @@
 # Zotero Library Organizer
 
 > [!WARNING]
-> **This tool is currently broken and will corrupt Zotero cloud sync.**
->
-> This tool modifies Zotero's SQLite database directly, bypassing Zotero's internal sync machinery. As reported in the [Zotero forums](https://forums.zotero.org/discussion/125783/not-a-valid-collection-key-upon-syncing), external tools that write to the database directly can produce invalid collection keys (e.g. `'WZ856FQ0' is not a valid collection key`) and corrupt the sync state between your local library and Zotero servers.
->
-> **Consequences of using this tool in its current state:**
-> - Zotero cloud sync will fail with "not a valid collection key" errors
-> - Collections created by this tool may not be recognized by Zotero's sync server
-> - You may need to restore from a backup to recover a clean sync state
->
-> A rewrite using the [Zotero Web API](https://www.zotero.org/support/dev/web_api/v3/start) is needed to fix this. Do not use this tool until that rewrite is complete.
-> In the meantime, **always back up your `zotero.sqlite` file before running any command**.
+> **This tool modifies your Zotero SQLite database directly. Always close Zotero and back up your `zotero.sqlite` file before running any command.** Incorrect modifications can corrupt your library or break cloud sync. The authors take no responsibility for data loss.
 
 A Python tool to organize Zotero libraries using AI-powered classification and keyword generation.
 
