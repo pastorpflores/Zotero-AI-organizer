@@ -1,8 +1,10 @@
-import anthropic
 import json
-from typing import List, Dict
-from zotero_connector import ZoteroLibrary
 from dataclasses import dataclass
+from typing import Dict, List
+
+import anthropic
+
+from zotero_connector import ZoteroLibrary
 
 
 @dataclass
@@ -25,42 +27,105 @@ class LibraryOrganizer:
             output_price=config['api_pricing']['output']
         )
 
+    def _get_item_label(self, item_type: str) -> str:
+        """Get human-readable label for item type."""
+        labels = {
+            'journalArticle': 'research paper',
+            'book': 'book',
+            'bookSection': 'book chapter',
+            'conferencePaper': 'conference paper',
+            'thesis': 'thesis',
+            'preprint': 'preprint',
+            'report': 'technical report',
+            'manuscript': 'manuscript',
+            'patent': 'patent',
+            'webpage': 'webpage',
+            'blogPost': 'blog post',
+            'presentation': 'presentation',
+        }
+        return labels.get(item_type, 'publication')
+
     def improve_paper_keywords(self, paper_id: int, library: ZoteroLibrary) -> List[str]:
         item = library.items[paper_id]
+        item_label = self._get_item_label(item.item_type)
 
-        prompt = f"""Suggest generic, reusable keywords for this paper. Terms should focus on the main process,
-        technique, or concept, no too broad terms. Include only the most relevant keywords.:
+        prompt = f"""Suggest 10 generic, reusable keywords for this {item_label}.
+        Terms should focus on the main topic, method, technique, concept, or subject.
+        Not too broad terms. Don't generate too similar keywords (e.g. INSTEAD 
+        OF 'neo-institutionalism', 'institutional theoy', 'social institutions'
+        just tag 'Neo-Institutionalism')
+        Include only the most relevant keywords. If you are missing the abstract,
+        don't state that you have no access to it. Just add keywords from the
+        title instead, as far as possible.
+
         Title: {item.title}
-        Abstract: {item.abstract}
+        {"Abstract: " + item.abstract if item.abstract else ""}
+        Type: {item.item_type}
+
         List only keywords, one per line."""
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=500,
+            max_tokens=800,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        new_keywords = [k.strip() for k in response.content[0].text.split('\n') if k.strip()]
-        library.update_item_keywords(paper_id, new_keywords)
+        raw_lines = [k.strip() for k in response.content[0].text.split('\n') if k.strip()]
+        new_keywords = []
+        
+        for line in raw_lines:
+            # Filter out obvious conversational noise or refusals
+            if len(line) > 100:
+                continue
+            
+            lower_line = line.lower()
+            if lower_line.startswith(("i don't", "i can't", "i cannot", "sorry", "here are", "sure, here", "unfortunately", "# Keywords", "#")):
+                continue
+                
+            # Remove common list enumerations (1. , - , *)
+            clean_line = line.lstrip("0123456789.-*• ")
+            
+            if clean_line:
+                new_keywords.append(clean_line)
+
+        if new_keywords:
+            try:
+                library.update_item_keywords(paper_id, new_keywords)
+                print(f"Added {len(new_keywords)} keywords to item {paper_id}")
+            except Exception as e:
+                print(f"Failed to update keywords for item {paper_id}: {e}")
+        else:
+            print(f"No valid keywords extracted for item {paper_id}. Raw response: {response.content[0].text[:100]}...")
+            
         return new_keywords
 
     def propose_collection_structure(self, library: ZoteroLibrary) -> Dict:
         keywords = sorted(library.get_all_keywords())
         keywords_str = "\n".join(keywords)
 
-        prompt = f"""Given these keywords from a research paper library:
+        # Analyze item type distribution
+        type_counts = {}
+        for item in library.items.values():
+            type_counts[item.item_type] = type_counts.get(item.item_type, 0) + 1
+
+        type_summary = ", ".join([f"{count} {t}s" for t, count in type_counts.items()])
+
+        prompt = f"""Given these keywords from a research library:
         {keywords_str}
+
+        Library contains: {type_summary}
 
         {self.field_context if self.field_context else ''}
 
-        Create a hierarchical collection structure as JSON to organize papers with these topics.
+        Create a hierarchical collection structure as JSON to organize publications with these topics.
+        The structure should work well for different publication types (articles, books, reports, etc.).
         Return ONLY valid JSON, with no trailing commas. Limit the proposal to a maximum 100 total collections.
         If a sub-collection is located with a parent collection called Battery Aging, don't repeat the word
         Battery Aging in the sub-collection name, subcollection example: Aging Mechanisms, Black box Modelling..."""
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -117,47 +182,55 @@ class LibraryOrganizer:
             # Delete existing collections
             library.delete_all_collections()
 
+            # Handle structure with top-level "collections" key
+            if 'collections' in structure and isinstance(structure['collections'], list):
+                collections_to_create = structure['collections']
+            else:
+                collections_to_create = structure
+
             # Create new structure
-            collection_map = library.create_collection_structure(structure)
+            collection_map = library.create_collection_structure(collections_to_create)
             print(f"Successfully created {len(collection_map)} collections")
 
         except Exception as e:
             print(f"Error implementing collection structure: {e}")
             raise
 
-    def classify_paper_in_collections(self, paper_id: int, library: ZoteroLibrary) -> None:
+    def classify_paper_in_collections(self, paper_id: int, library: ZoteroLibrary,
+                                      structure_file: str = 'proposal.json') -> None:
         """Classify a paper into appropriate collections using the LLM and update Zotero."""
         item = library.items[paper_id]
 
-        # Get flattened collection structure
-        collection_paths = []
-        collection_map = {}  # Map paths to collection IDs
+        # Build a map of "Path/To/Collection" -> Key from the actual loaded library
+        # This ensures we match against what actually exists in Zotero
+        collection_map = {}
+        for key in library.collections:
+            path = library.get_collection_path(key)
+            if path:
+                collection_map[path] = key
 
-        def flatten_collections(structure: dict, prefix: str = ""):
-            for name, content in structure.items():
-                full_path = f"{prefix}/{name}" if prefix else name
-                collection_paths.append(full_path)
-                # Map path to collection ID
-                for coll in library.collections.values():
-                    if coll.name == name:
-                        collection_map[full_path] = coll.collection_id
-                if isinstance(content, dict):
-                    flatten_collections(content, full_path)
+        collection_paths = sorted(list(collection_map.keys()))
+        print(f"Mapped {len(collection_map)} collections from Zotero library")
 
-        with open('my_proposal.json', 'r') as f:
-            structure = json.load(f)
-        flatten_collections(structure)
+        if not collection_paths:
+            print("Warning: No collections found in library!")
+            return
 
         # Get collection suggestions from LLM
-        prompt = f"""Given this paper:
+        item_type_label = self._get_item_label(item.item_type)
+
+        prompt = f"""Given this {item_type_label}:
         Title: {item.title}
-        Abstract: {item.abstract}
+        {"Abstract: " + item.abstract if item.abstract else ""}
         Keywords: {', '.join(item.keywords)}
+        Type: {item.item_type}
 
         And these available collections:
         {chr(10).join(collection_paths)}
 
-        List the most appropriate collections for this paper. Output only the exact collection paths, one per line.
+        List the most appropriate collections for this publication.
+        Output only the exact collection paths, one per line.
+        Do not include any explanation or conversational text.
         Choose between 1-3 most relevant collections."""
 
         response = self.client.messages.create(
@@ -168,10 +241,29 @@ class LibraryOrganizer:
         )
 
         # Update paper collections in Zotero
-        collections = [line.strip() for line in response.content[0].text.split('\n') if line.strip()]
-        collection_ids = [collection_map[c] for c in collections if c in collection_map]
-        if collection_ids:
-            library.update_item_collections(paper_id, collection_ids)
-            print(f"Updated collections for paper: {collections}")
+        llm_response = response.content[0].text
+        print(f"LLM suggested collections:\n{llm_response}")
+
+        lines = [line.strip() for line in llm_response.split('\n') if line.strip()]
+        collection_keys = []
+        
+        for line in lines:
+            # Exact match check
+            if line in collection_map:
+                collection_keys.append(collection_map[line])
+            else:
+                # Try to clean up quotes or bullets if model messed up
+                clean_line = line.strip(' "-*')
+                if clean_line in collection_map:
+                    collection_keys.append(collection_map[clean_line])
+                else:
+                    # Ignore conversational lines
+                    if '/' in line or line in collection_paths: # Only warn if it looks like a path
+                         print(f"Warning: Collection '{line}' not found in collection_map")
+
+        if collection_keys:
+            library.update_item_collections(paper_id, collection_keys)
+            matched_names = [library.collections[cid].name for cid in collection_keys if cid in library.collections]
+            print(f"Successfully classified into: {matched_names}")
         else:
-            print("No matching collections found")
+            print("No matching collections found - paper not classified")

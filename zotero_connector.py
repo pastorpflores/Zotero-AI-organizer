@@ -3,41 +3,59 @@ import os
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
+from pyzotero import zotero
 
 
 @dataclass
 class ZoteroItem:
     """Represents a paper/item in the Zotero library."""
     item_id: int
+    key: str
     title: str
     keywords: List[str]
     abstract: str
     collections: List[str]
+    item_type: str
+    metadata: Dict[str, str] = None
 
 
 class ZoteroCollection:
     """Represents a collection in the Zotero library."""
-    def __init__(self, collection_id: int, name: str, parent_id: Optional[int] = None):
-        self.collection_id = collection_id
+    def __init__(self, key: str, name: str, parent_key: Optional[str] = None):
+        self.key = key
         self.name = name
-        self.parent_id = parent_id
+        self.parent_key = parent_key
         self.items: List[ZoteroItem] = []
 
 
 class ZoteroLibrary:
-    """Main class to interact with Zotero SQLite database."""
+    """Main class to interact with Zotero SQLite database (Read) and API (Write)."""
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, item_types: List[str] = None, 
+                 zotero_user_id: str = None, zotero_api_key: str = None):
         self.db_path = self._find_db_path(db_path)
-        self.collections: Dict[int, ZoteroCollection] = {}
+        self.collections: Dict[str, ZoteroCollection] = {}
         self.items: Dict[int, ZoteroItem] = {}
-        self.library_id = 1  # Default library ID
+        self.library_id = None
+        self._db_collection_id_map: Dict[int, str] = {} # Map local int ID to key
+
+        # API Client
+        if zotero_user_id and zotero_api_key:
+            try:
+                self.zot = zotero.Zotero(zotero_user_id, 'user', zotero_api_key)
+            except Exception as e:
+                print(f"Warning: Failed to initialize Zotero API client: {e}")
+                self.zot = None
+        else:
+            print("Warning: Zotero API credentials not provided. Write operations will fail.")
+            self.zot = None
+
+        self.item_types = item_types if item_types else ['journalArticle']
+        self.excluded_types = {'note', 'attachment', 'annotation'}
 
     def _find_db_path(self, db_path: Optional[str]) -> str:
-        """Locate Zotero database file."""
         if db_path and os.path.exists(db_path):
             return db_path
-
         home = str(Path.home())
         zotero_dir = os.path.join(home, '.zotero/zotero')
         if os.path.exists(zotero_dir):
@@ -46,190 +64,243 @@ class ZoteroLibrary:
                 default_path = os.path.join(zotero_dir, profiles[0], 'zotero.sqlite')
                 if os.path.exists(default_path):
                     return default_path
-
-        raise FileNotFoundError("Could not find Zotero database. Please specify path manually.")
+        raise FileNotFoundError("Could not find Zotero database.")
 
     def connect(self) -> sqlite3.Connection:
-        """Create connection to Zotero database."""
         return sqlite3.connect(self.db_path)
 
     def load_library(self) -> None:
-        """Load all collections and items from database."""
+        """Load library data."""
         with self.connect() as conn:
-            self._load_collections(conn)
-            self._load_items(conn)
-            self._load_collection_items(conn)
+            self._detect_library_id(conn)
+            
+            # Prefer API for collections to ensure fresh state
+            loaded_from_api = False
+            if self.zot:
+                try:
+                    print("Fetching collections from Zotero API...")
+                    self._load_collections_from_api()
+                    loaded_from_api = True
+                except Exception as e:
+                    print(f"Failed to fetch from API ({e}), falling back to database.")
+            
+            if not loaded_from_api:
+                self._load_collections_from_db(conn)
 
-    def _load_collections(self, conn: sqlite3.Connection) -> None:
+            self._load_items(conn)
+            
+            # Only load DB relationships if we are using DB collections
+            # Otherwise, we can't map local IDs to API keys reliably without sync
+            if not loaded_from_api:
+                self._load_collection_items(conn)
+
+    def _detect_library_id(self, conn: sqlite3.Connection) -> None:
+        type_placeholders = ','.join(['?' for _ in self.item_types])
+        cursor = conn.execute(f"""
+            SELECT DISTINCT i.libraryID
+            FROM items i
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE it.typeName IN ({type_placeholders})
+            LIMIT 1
+        """, tuple(self.item_types))
+        result = cursor.fetchone()
+        self.library_id = result[0] if result else 1
+
+    def _load_collections_from_api(self) -> None:
+        """Load collections from API with manual pagination."""
+        all_colls = []
+        start = 0
+        limit = 100
+        
+        while True:
+            colls = self.zot.collections(limit=limit, start=start)
+            all_colls.extend(colls)
+            if len(colls) < limit:
+                break
+            start += limit
+            
+        print(f"Fetched {len(all_colls)} collections from API.")
+        
+        for c in all_colls:
+            data = c['data']
+            key = data['key']
+            name = data['name']
+            parent = data.get('parentCollection')
+            if parent == False: parent = None # pyzotero sometimes returns False
+            
+            self.collections[key] = ZoteroCollection(key, name, parent)
+
+    def _load_collections_from_db(self, conn: sqlite3.Connection) -> None:
         """Load collections from database."""
         cursor = conn.execute("""
-            SELECT collectionID, collectionName, parentCollectionID
+            SELECT collectionID, key, collectionName, parentCollectionID
             FROM collections
-        """)
-        for collection_id, name, parent_id in cursor.fetchall():
-            self.collections[collection_id] = ZoteroCollection(collection_id, name, parent_id)
+            WHERE libraryID = ?
+        """, (self.library_id,))
+        
+        # We need a temporary map of ID -> Key to resolve parents
+        temp_map = {}
+        raw_colls = []
+        
+        for collection_id, key, name, parent_id in cursor.fetchall():
+            temp_map[collection_id] = key
+            self._db_collection_id_map[collection_id] = key
+            raw_colls.append((key, name, parent_id))
+            
+        for key, name, parent_id in raw_colls:
+            parent_key = temp_map.get(parent_id) if parent_id else None
+            self.collections[key] = ZoteroCollection(key, name, parent_key)
 
     def _load_items(self, conn: sqlite3.Connection) -> None:
-        """Load items from database."""
-        cursor = conn.execute("""
-            SELECT i.itemID,
-                (SELECT iv.value FROM itemData id
-                    JOIN itemDataValues iv ON id.valueID = iv.valueID
-                    WHERE id.itemID = i.itemID
-                    AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title')
-                    LIMIT 1) as title,
-                (SELECT iv.value FROM itemData id
-                    JOIN itemDataValues iv ON id.valueID = iv.valueID
-                    WHERE id.itemID = i.itemID
-                    AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'abstractNote')
-                    LIMIT 1) as abstract,
-                (SELECT GROUP_CONCAT(t.name, '; ')
-                    FROM itemTags it
-                    JOIN tags t ON it.tagID = t.tagID
-                    WHERE it.itemID = i.itemID) as keywords
+        type_placeholders = ','.join(['?' for _ in self.item_types])
+        cursor = conn.execute(f"""
+            SELECT
+                i.itemID, i.key, it.typeName,
+                (SELECT iv.value FROM itemData id JOIN itemDataValues iv ON id.valueID = iv.valueID WHERE id.itemID = i.itemID AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'title') LIMIT 1) as title,
+                (SELECT iv.value FROM itemData id JOIN itemDataValues iv ON id.valueID = iv.valueID WHERE id.itemID = i.itemID AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'abstractNote') LIMIT 1) as abstract,
+                (SELECT iv.value FROM itemData id JOIN itemDataValues iv ON id.valueID = iv.valueID WHERE id.itemID = i.itemID AND id.fieldID = (SELECT fieldID FROM fields WHERE fieldName = 'extra') LIMIT 1) as extra,
+                (SELECT GROUP_CONCAT(t.name, '; ') FROM itemTags it JOIN tags t ON it.tagID = t.tagID WHERE it.itemID = i.itemID) as keywords
             FROM items i
-            WHERE i.itemTypeID = (SELECT itemTypeID FROM itemTypes WHERE typeName = 'journalArticle')
-        """)
+            JOIN itemTypes it ON i.itemTypeID = it.itemTypeID
+            WHERE it.typeName IN ({type_placeholders})
+            AND i.libraryID = ?
+        """, tuple(self.item_types) + (self.library_id,))
 
-        for item_id, title, abstract, keywords in cursor.fetchall():
+        for item_id, key, item_type, title, abstract, extra, keywords in cursor.fetchall():
             if title:
+                primary_text = abstract if abstract else (extra or "")
                 keywords_list = keywords.split('; ') if keywords else []
-                self.items[item_id] = ZoteroItem(
-                    item_id=item_id,
-                    title=title,
-                    keywords=keywords_list,
-                    abstract=abstract or "",
-                    collections=[]
-                )
+                self.items[item_id] = ZoteroItem(item_id, key, title, keywords_list, primary_text, [], item_type, {})
 
     def _load_collection_items(self, conn: sqlite3.Connection) -> None:
-        """Load collection-item relationships."""
+        """Load relationships. Only useful if collections were loaded from DB."""
         cursor = conn.execute("SELECT collectionID, itemID FROM collectionItems")
         for collection_id, item_id in cursor.fetchall():
-            if collection_id in self.collections and item_id in self.items:
-                collection = self.collections[collection_id]
-                item = self.items[item_id]
-                collection.items.append(item)
-                item.collections.append(collection.name)
+            if collection_id in self._db_collection_id_map and item_id in self.items:
+                collection_key = self._db_collection_id_map[collection_id]
+                if collection_key in self.collections:
+                    collection = self.collections[collection_key]
+                    item = self.items[item_id]
+                    collection.items.append(item)
+                    item.collections.append(collection.name)
 
-    def create_collection(self, name: str, parent_id: Optional[int] = None) -> int:
-        """Create new collection in Zotero."""
-        with self.connect() as conn:
-            # Generate a unique key using Zotero's character set (excludes 0, 1, I, O)
-            import random
-            key = ''.join(random.choices('23456789ABCDEFGHJKLMNPQRSTUVWXYZ', k=8))
+    def create_collection(self, name: str, parent_key: Optional[str] = None) -> str:
+        """Create new collection in Zotero via API. Returns Key."""
+        if not self.zot: raise RuntimeError("API not initialized")
 
-            cursor = conn.execute(
-                "INSERT INTO collections (collectionName, parentCollectionID, libraryID, key) VALUES (?, ?, ?, ?)",
-                (name, parent_id, self.library_id, key)
-            )
-            collection_id = cursor.lastrowid
-            self.collections[collection_id] = ZoteroCollection(collection_id, name, parent_id)
-            return collection_id
+        payload = {'name': name}
+        if parent_key:
+            if parent_key not in self.collections:
+                raise ValueError(f"Parent {parent_key} not found")
+            payload['parentCollection'] = parent_key
 
-    def delete_collection(self, collection_id: int) -> None:
-        """Delete collection and update items."""
-        if collection_id not in self.collections:
-            raise ValueError(f"Collection {collection_id} not found")
+        try:
+            resp = self.zot.create_collections([payload])
+            if resp and 'successful' in resp and resp['successful']:
+                new_key = list(resp['successful'].keys())[0]
+                self.collections[new_key] = ZoteroCollection(new_key, name, parent_key)
+                return new_key
+            else:
+                raise RuntimeError(f"Failed to create collection: {resp}")
+        except Exception as e:
+            raise RuntimeError(f"API Error: {e}")
 
-        with self.connect() as conn:
-            # Remove collection-item relationships
-            conn.execute("DELETE FROM collectionItems WHERE collectionID = ?", (collection_id,))
-            # Delete collection
-            conn.execute("DELETE FROM collections WHERE collectionID = ?", (collection_id,))
+    def delete_collection(self, collection_key: str) -> None:
+        if collection_key not in self.collections: raise ValueError("Collection not found")
+        if not self.zot: raise RuntimeError("API not initialized")
 
-            # Update local data
-            collection = self.collections[collection_id]
-            for item in collection.items:
-                item.collections.remove(collection.name)
-            del self.collections[collection_id]
+        try:
+            self.zot.delete_collection(collection_key)
+            coll = self.collections.pop(collection_key)
+            for item in coll.items:
+                if coll.name in item.collections:
+                    item.collections.remove(coll.name)
+        except Exception as e:
+            raise RuntimeError(f"API Error: {e}")
 
-    def move_collection(self, collection_id: int, new_parent_id: Optional[int]) -> None:
-        """Move collection to new parent."""
-        if collection_id not in self.collections:
-            raise ValueError(f"Collection {collection_id} not found")
-        if new_parent_id and new_parent_id not in self.collections:
-            raise ValueError(f"Parent collection {new_parent_id} not found")
+    def get_collection_path(self, key: str) -> str:
+        """Recursively build path name/name/name"""
+        if key not in self.collections: return ""
+        coll = self.collections[key]
+        if coll.parent_key:
+            return f"{self.get_collection_path(coll.parent_key)}/{coll.name}"
+        return coll.name
 
-        with self.connect() as conn:
-            conn.execute(
-                "UPDATE collections SET parentCollectionID = ? WHERE collectionID = ?",
-                (new_parent_id, collection_id)
-            )
-            self.collections[collection_id].parent_id = new_parent_id
+    def update_item_collections(self, item_id: int, collection_keys: List[str]) -> None:
+        if item_id not in self.items: raise ValueError("Item not found")
+        if not self.zot: raise RuntimeError("API not initialized")
 
-    def update_item_collections(self, item_id: int, collection_ids: List[int]) -> None:
-        if item_id not in self.items:
-            raise ValueError(f"Item {item_id} not found")
-
-        with self.connect() as conn:
-            conn.execute("DELETE FROM collectionItems WHERE itemID = ?", (item_id,))
-
-            for i, coll_id in enumerate(collection_ids):
-                if coll_id in self.collections:
-                    conn.execute(
-                        "INSERT INTO collectionItems (itemID, collectionID, orderIndex) VALUES (?, ?, ?)",
-                        (item_id, coll_id, i)
-                    )
-
-            item = self.items[item_id]
-            item.collections = [self.collections[cid].name for cid in collection_ids if cid in self.collections]
+        item = self.items[item_id]
+        try:
+            # We must fetch the item to update it safely
+            current = self.zot.item(item.key)
+            # update_item expects the 'data' content, not the full wrapper
+            item_data = current['data']
+            item_data['collections'] = collection_keys
+            self.zot.update_item(item_data)
+            
+            # Update local
+            item.collections = [self.collections[k].name for k in collection_keys if k in self.collections]
+        except Exception as e:
+            raise RuntimeError(f"API Error: {e}")
 
     def update_item_keywords(self, item_id: int, new_keywords: List[str]) -> None:
-        if item_id not in self.items:
-            raise ValueError(f"Item {item_id} not found")
-
-        # Combine existing and new keywords, remove duplicates
-        combined_keywords = list(set(self.items[item_id].keywords + new_keywords))
-
-        with self.connect() as conn:
-            # Clear existing tag relationships
-            conn.execute("DELETE FROM itemTags WHERE itemID = ?", (item_id,))
-
-            # Add all keywords
-            for keyword in combined_keywords:
-                cursor = conn.execute("SELECT tagID FROM tags WHERE name = ?", (keyword,))
-                tag_id = cursor.fetchone()
-
-                if not tag_id:
-                    cursor = conn.execute("INSERT INTO tags (name) VALUES (?)", (keyword,))
-                    tag_id = cursor.lastrowid
-                else:
-                    tag_id = tag_id[0]
-
-                conn.execute("INSERT INTO itemTags (itemID, tagID, type) VALUES (?, ?, 0)", (item_id, tag_id))
-
-            self.items[item_id].keywords = combined_keywords
+        if item_id not in self.items: raise ValueError("Item not found")
+        if not self.zot: raise RuntimeError("API not initialized")
+        
+        item = self.items[item_id]
+        try:
+            zotero_item = self.zot.item(item.key)
+            if 'data' in zotero_item and 'deleted' in zotero_item['data']:
+                del zotero_item['data']['deleted']
+            self.zot.add_tags(zotero_item, *new_keywords)
+            item.keywords = list(set(item.keywords + new_keywords))
+        except Exception as e:
+            raise RuntimeError(f"API Error: {e}")
 
     def get_all_keywords(self) -> set[str]:
-        """Get all unique keywords from all items in the library."""
         all_keywords = set()
         for item in self.items.values():
             all_keywords.update(item.keywords)
         return all_keywords
 
     def delete_all_collections(self) -> None:
-        """Delete all collections from the library."""
-        with self.connect() as conn:
-            conn.execute("DELETE FROM collectionItems")
-            conn.execute(f"DELETE FROM collections WHERE libraryID = {self.library_id}")
-            self.collections.clear()
-            for item in self.items.values():
-                item.collections.clear()
+        if not self.zot: raise RuntimeError("API not initialized")
+        
+        # Get all keys currently known
+        keys = list(self.collections.keys())
+        print(f"Deleting {len(keys)} collections via API...")
+        
+        # Delete one by one (safest)
+        for k in keys:
+            try:
+                self.zot.delete_collection(k)
+            except:
+                pass
+        self.collections.clear()
+        for item in self.items.values():
+            item.collections.clear()
 
-    def create_collection_structure(self, structure: dict, parent_id: Optional[int] = None) -> Dict[str, int]:
-        """Create a nested collection structure from a dictionary.
-        Returns a mapping of collection names to their IDs."""
+    def create_collection_structure(self, structure, parent_key: Optional[str] = None) -> Dict[str, str]:
+        """Create structure. Returns Name -> Key map."""
         collection_map = {}
-
-        for name, content in structure.items():
-            # Create the collection
-            collection_id = self.create_collection(name, parent_id)
-            collection_map[name] = collection_id
-
-            # Recursively create subcollections if they exist
-            if isinstance(content, dict):
-                subcollection_map = self.create_collection_structure(content, collection_id)
-                collection_map.update(subcollection_map)
-
+        
+        if isinstance(structure, list):
+            for item in structure:
+                if isinstance(item, dict) and 'name' in item:
+                    name = item['name']
+                    key = self.create_collection(name, parent_key)
+                    collection_map[name] = key
+                    if 'subcollections' in item:
+                        sub_map = self.create_collection_structure(item['subcollections'], key)
+                        collection_map.update(sub_map)
+        
+        elif isinstance(structure, dict):
+            for name, content in structure.items():
+                key = self.create_collection(name, parent_key)
+                collection_map[name] = key
+                if isinstance(content, dict):
+                    sub_map = self.create_collection_structure(content, key)
+                    collection_map.update(sub_map)
+                    
         return collection_map

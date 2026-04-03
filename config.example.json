@@ -1,0 +1,20 @@
+{
+  "zotero_db_path": "/path/to/zotero.sqlite",
+  "zotero_user_id": "zotero-userID",
+  "zotero_api_key": "zotero-APIkey",
+  "anthropic_api_key": "sk-ant-Your-Anthropic-API-Key",
+  "model": "claude-haiku-4-5-20251001",
+  "api_pricing": {
+    "input": 0.8,
+    "cache_write": 1.0,
+    "cache_read": 0.08,
+    "output": 4.0
+  },
+  "item_types": [
+    "journalArticle",
+    "book",
+    "bookSection",
+    "conferencePaper",
+    "report"
+  ]
+}

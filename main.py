@@ -4,6 +4,7 @@ import sys
 
 from zotero_connector import ZoteroLibrary
 from library_organizer import LibraryOrganizer
+from state_manager import StateManager
 
 
 def load_config(config_path: str = 'config.json') -> dict:
@@ -18,16 +19,37 @@ def load_config(config_path: str = 'config.json') -> dict:
         sys.exit(1)
 
 
-def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
+def validate_config(config: dict) -> None:
+    """Validate configuration and provide helpful warnings."""
+    if 'item_types' not in config:
+        print("Note: 'item_types' not specified. Using default: ['journalArticle']")
+        print("To process other types, add 'item_types' to config.json")
+    else:
+        item_types = config['item_types']
+        enabled = item_types if isinstance(item_types, list) else item_types.get('enabled', [])
+        print(f"Processing {len(enabled)} item type(s): {', '.join(enabled)}")
+        
+    if 'zotero_user_id' not in config or 'zotero_api_key' not in config:
+        print("Warning: 'zotero_user_id' or 'zotero_api_key' missing. Write operations (API) will fail.")
+
+
+def generate_keywords(library: ZoteroLibrary, organizer: LibraryOrganizer, state_manager: StateManager) -> None:
     """Generate new keywords for papers without collections."""
     unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
     print(f"Found {len(unclassified)} unclassified papers")
 
     for paper_id, paper in unclassified.items():
+        if state_manager.is_processed(paper_id, 'keywords'):
+            print(f"Skipping {paper.title} (already processed)")
+            continue
+
         print(f"\nProcessing: {paper.title}")
         print(f"Original keywords: {', '.join(paper.keywords)}")
         new_keywords = organizer.improve_paper_keywords(paper_id, library)
-        print(f"New keywords: {', '.join(new_keywords)}")
+        
+        if new_keywords:
+            state_manager.mark_processed(paper_id, 'keywords')
+            print(f"New keywords: {', '.join(new_keywords)}")
 
 
 def propose_collections(library: ZoteroLibrary, organizer: LibraryOrganizer, output_path: str = "proposed_collections.json") -> None:
@@ -55,15 +77,37 @@ def implement_collections(library: ZoteroLibrary, organizer: LibraryOrganizer, s
         sys.exit(1)
 
 
-def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer) -> None:
-    """Classify papers without collections into the current hierarchy."""
-    unclassified = {pid: paper for pid, paper in library.items.items() if not paper.collections}
-    print(f"Found {len(unclassified)} unclassified papers")
+def classify_papers(library: ZoteroLibrary, organizer: LibraryOrganizer, state_manager: StateManager, structure_file: str = 'proposal.json', force: bool = False) -> None:
+    """Classify papers into the current hierarchy."""
+    to_process = {}
+    
+    if force:
+        to_process = library.items
+        print(f"Force mode enabled. Processing all {len(to_process)} papers.")
+    else:
+        # Filter by state_manager instead of unreliable local collection status
+        for pid, paper in library.items.items():
+            if not state_manager.is_processed(pid, 'classify'):
+                to_process[pid] = paper
+                
+        print(f"Found {len(to_process)} papers pending classification")
+        processed_count = len(library.items) - len(to_process)
+        if processed_count > 0:
+            print(f"(Skipping {processed_count} already processed papers)")
 
-    for paper_id, paper in unclassified.items():
+    for paper_id, paper in to_process.items():
         print(f"\nProcessing: {paper.title}")
-        organizer.classify_paper_in_collections(paper_id, library)
-        print(f"Classified into: {', '.join(library.items[paper_id].collections)}")
+        organizer.classify_paper_in_collections(paper_id, library, structure_file)
+        
+        # Mark as processed regardless of outcome to prevent infinite loops on unclassifiable items
+        state_manager.mark_processed(paper_id, 'classify')
+        
+        # Determine success for display (this is local only, library.items updated by organizer)
+        current_colls = library.items[paper_id].collections
+        if current_colls:
+            print(f"Classified into: {', '.join(current_colls)}")
+        else:
+            print("Item left unclassified.")
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -84,7 +128,9 @@ def get_parser() -> argparse.ArgumentParser:
     implement_parser.add_argument("structure", help="Path to collection structure JSON")
 
     # Classify papers
-    subparsers.add_parser("classify", help="Classify unclassified papers into collections")
+    classify_parser = subparsers.add_parser("classify", help="Classify unclassified papers into collections")
+    classify_parser.add_argument("--structure", default="proposal.json", help="Path to collection structure JSON (default: proposal.json)")
+    classify_parser.add_argument("--force", action="store_true", help="Process all papers, including those already in collections")
     return parser
 
 
@@ -97,18 +143,36 @@ def main():
         sys.exit(1)
 
     config = load_config(args.config)
-    library = ZoteroLibrary(config['zotero_db_path'])
+    validate_config(config)
+
+    # Extract item_types from config (default: journalArticle)
+    item_types = config.get('item_types', ['journalArticle'])
+
+    # Handle both simple list and complex dict format (future-proofing)
+    if isinstance(item_types, dict):
+        item_types_list = item_types.get('enabled', ['journalArticle'])
+    else:
+        item_types_list = item_types
+
+    library = ZoteroLibrary(
+        db_path=config['zotero_db_path'],
+        item_types=item_types_list,
+        zotero_user_id=config.get('zotero_user_id'),
+        zotero_api_key=config.get('zotero_api_key')
+    )
     library.load_library()
     organizer = LibraryOrganizer(config)
+    state_manager = StateManager()
 
     commands = {
-        "keywords": lambda: generate_keywords(library, organizer),
+        "keywords": lambda: generate_keywords(library, organizer, state_manager),
         "propose": lambda: propose_collections(library, organizer, args.output),
         "implement": lambda: implement_collections(library, organizer, args.structure),
-        "classify": lambda: classify_papers(library, organizer)
+        "classify": lambda: classify_papers(library, organizer, state_manager, args.structure, args.force)
     }
 
     commands[args.command]()
+
 
 
 if __name__ == "__main__":
