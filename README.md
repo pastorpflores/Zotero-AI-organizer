@@ -10,6 +10,12 @@ Thanks to @ypsilonkah for the great improvements in his fork https://github.com/
 
 Cf. for a potential problem here: https://forums.zotero.org/discussion/125783/not-a-valid-collection-key-upon-syncing
 
+## Which version should I use?
+
+**This version (v2.0-api) requires a Zotero account with cloud sync enabled.** It uses the [Zotero Web API](https://www.zotero.org/support/dev/web_api/v3/start), which communicates with zotero.org servers — it does not work with a local-only Zotero installation.
+
+If you do not use Zotero cloud sync, use the [v1.0-sqlite](https://github.com/pastorpflores/Zotero-AI-organizer/tree/v1.0-sqlite) tag instead. That version modifies the SQLite database directly and works fully offline. However, be aware that the Zotero team strongly recommends never modifying the SQLite database directly, as it can lead to data corruption and sync issues. Use it at your own risk and always back up your `zotero.sqlite` file first.
+
 ## 🚀 Key Changes: API Integration
 
 **Important Update:** Unlike previous versions that modified the SQLite database directly, this version uses the **Zotero Web API** for all write operations (creating collections, moving items, adding tags).
